@@ -25,9 +25,53 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:github-ci
 
+      - name: Resolve target via Tailscale
+        id: resolve-host
+        env:
+          TS_HOST_INPUT: ${{ secrets.LXC_TAILSCALE_HOST }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TS_HOST_INPUT:-}" ]; then
+            echo "Secret LXC_TAILSCALE_HOST is not set" >&2
+            exit 1
+          fi
+
+          USER_PART=""
+          HOST_PART="$TS_HOST_INPUT"
+          if echo "$TS_HOST_INPUT" | grep -q "@"; then
+            USER_PART="${TS_HOST_INPUT%@*}"
+            HOST_PART="${TS_HOST_INPUT#*@}"
+          fi
+
+          TARGET_IP=""
+          if echo "$HOST_PART" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            TARGET_IP="$HOST_PART"
+          else
+            TARGET_IP="$(tailscale status | awk -v h="$HOST_PART" '$2==h {print $1; exit}')"
+            if [ -z "$TARGET_IP" ]; then
+              TARGET_IP="$(ping -4 -c 1 "$HOST_PART" | awk -F'[()]' 'NR==1 {print $2}')"
+            fi
+          fi
+
+          if [ -z "$TARGET_IP" ]; then
+            echo "Could not resolve $HOST_PART via tailscale status or ping" >&2
+            exit 1
+          fi
+
+          if [ -n "$USER_PART" ]; then
+            SSH_TARGET="${USER_PART}@${TARGET_IP}"
+          else
+            SSH_TARGET="$TARGET_IP"
+          fi
+
+          echo "ssh_target=$SSH_TARGET" >> "$GITHUB_OUTPUT"
+          echo "host_ip=$TARGET_IP" >> "$GITHUB_OUTPUT"
+
       - name: Deploy latest container
         env:
           TS_HOST: ${{ secrets.LXC_TAILSCALE_HOST }}
+          SSH_TARGET: ${{ steps.resolve-host.outputs.ssh_target }}
         run: |
           set -euo pipefail
 
@@ -36,9 +80,14 @@ jobs:
             exit 1
           fi
 
-          tailscale ping -c 4 "$TS_HOST"
+          if [ -z "${SSH_TARGET:-}" ]; then
+            echo "SSH_TARGET missing from resolve step" >&2
+            exit 1
+          fi
 
-          tailscale ssh "$TS_HOST" <<'EOF'
+          tailscale ping -c 4 "$SSH_TARGET"
+
+          tailscale ssh "$SSH_TARGET" <<'EOF'
           set -euo pipefail
 
           docker pull ghcr.io/waddenn/bourse-dashboard:latest
