@@ -44,7 +44,10 @@ jobs:
 
           SSH_TARGET="${TS_USER}@${TS_HOST}"
 
-          tailscale ping -c 4 "$TS_HOST"
+          # Autorise le ping à échouer si seulement une route DERP est dispo (le runner GitHub est souvent derrière NAT).
+          if ! tailscale ping -c 4 "$TS_HOST"; then
+            echo "tailscale ping: pas de connexion directe (DERP only), on continue." >&2
+          fi
 
           tailscale ssh "$SSH_TARGET" <<'EOF'
           set -euo pipefail
